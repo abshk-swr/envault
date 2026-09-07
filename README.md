@@ -57,11 +57,11 @@ Commands:
 ### Examples
 
 ```bash
-# 1. Add secrets (input is hidden with stty restore trap)
-envault add stripe-secret-key
-envault add aws-access-key-id
+# 1. Add secrets (keys use alphanumeric & underscore; input is hidden)
+envault add stripe_secret_key
+envault add aws_access_key_id
 
-# 2. List tracked credentials
+# 2. List tracked credentials (displayed in canonical snake_case)
 envault ls
 
 # 3. Export to .env file (default behavior, safe overwrite prompt)
@@ -70,8 +70,8 @@ envault export
 # 4. Force overwrite without prompt
 envault export -f
 
-# 5. Export specific secrets to a custom file
-envault export -o .env.production stripe-secret-key
+# 5. Export specific secrets to a custom file (case-insensitive lookup)
+envault export -o .env.production STRIPE_SECRET_KEY
 
 # 6. Ingest directly into current terminal session
 eval "$(envault export -s)"
@@ -79,9 +79,15 @@ eval "$(envault export -s)"
 # 7. Pipe dotenv format to clipboard or another tool
 envault export --stdout | pbcopy
 
-# 8. Check if a key is registered
-envault check stripe-secret-key
+# 8. Check if a key is registered (case-insensitive)
+envault check stripe_secret_key
+envault check STRIPE_SECRET_KEY
 ```
+
+> **Key Naming Invariants:**
+> * Keys must match `^[a-zA-Z0-9_]+$`. Hyphens and special characters are rejected with an actionable error.
+> * Storage and lookups are completely **case-insensitive** and normalized to `snake_case`.
+> * Export outputs standard uppercase environment variables (e.g. `STRIPE_SECRET_KEY`).
 
 ---
 
@@ -91,31 +97,31 @@ Add the following to your `~/.zshrc` or `~/.bashrc`:
 
 ```zsh
 # ==============================================================================
-# envault Aliases & Functions
+# envault Aliases & Functions (vt* Family)
 # ==============================================================================
 export PATH="$HOME/.local/bin:$PATH"
 
 # Core Subcommand Aliases
-alias eva="envault add"
-alias evl="envault ls"
-alias eve="envault check"
-alias evr="envault rm"
+alias vta="envault add"
+alias vtl="envault ls"
+alias vtc="envault check"
+alias vtr="envault rm"
 
-# [evx] Default export -> writes to .env
-alias evx="envault export"
+# [vtx] Default export -> writes to .env
+alias vtx="envault export"
 
-# [evst] Stream dotenv format to stdout (pipes, pbcopy, container injection)
-alias evst="envault export --stdout"
+# [vtst] Stream dotenv format to stdout (pipes, pbcopy, container injection)
+alias vtst="envault export --stdout"
 
-# [evsh] Dynamic Shell Runtime Ingestion (silent, zero-log eval)
-evsh() {
+# [vtsh] Dynamic Shell Runtime Ingestion (silent, zero-log eval)
+vtsh() {
     eval "$(envault export -s "$@")"
 }
 
-# [evxf] Export to custom file followed by optional keys
-evxf() {
+# [vtxf] Export to custom file followed by optional keys
+vtxf() {
     if [ -z "${1:-}" ]; then
-        echo "Usage: evxf <filename> [keys...]" >&2
+        echo "Usage: vtxf <filename> [keys...]" >&2
         return 1
     fi
     local dest_file="$1"

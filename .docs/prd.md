@@ -65,7 +65,11 @@ All subcommands are executed within `envault` via internal in-process function r
   * `-o`, `--output`, `--file <path>`: Specifies custom output file destination (defaults to `.env`).
   * `-f`, `--force`: Overwrites target file without confirmation prompt if it already exists.
   * `--stdout`, `-c`: Streams `.env` formatted content directly to `stdout` instead of writing to disk (for pipes, clipboard, or containers).
-* **Identifier Sanitization**: Converts lowercase letters and hyphens to uppercase POSIX environment variable format (e.g. `stripe-secret-key` → `STRIPE_SECRET_KEY`).
+* **Identifier Sanitization & Validation**:
+  * Keys are strictly validated to match `^[a-zA-Z0-9_]+$`. Hyphens and special characters are rejected at ingestion time.
+  * Keys are normalized to lowercase `snake_case` in tracking storage and macOS Keychain.
+  * Lookups are completely case-insensitive.
+  * When exported to `.env` files or shell runtime environments, keys are converted to canonical uppercase POSIX environment variables (e.g. `stripe_secret_key` → `STRIPE_SECRET_KEY`).
 * **Safe Quoting**:
   * File mode escapes backslashes and double quotes (`KEY="escaped\"val"`).
   * Shell mode uses `printf '%q'` for robust shell escaping (`export KEY=val` / `export KEY="complex\$val"`), ensuring safe `eval` ingestion with arbitrary special characters.
@@ -81,26 +85,26 @@ The tool delegates workspace orchestration to the user's shell configuration:
 export PATH="$HOME/.local/bin:$PATH"
 
 # Core Subcommand Aliases
-alias eva="envault add"
-alias evl="envault ls"
-alias eve="envault check"
-alias evr="envault rm"
+alias vta="envault add"
+alias vtl="envault ls"
+alias vtc="envault check"
+alias vtr="envault rm"
 
-# [evx] Default export to .env
-alias evx="envault export"
+# [vtx] Default export to .env
+alias vtx="envault export"
 
-# [evst] Stream dotenv format to stdout (pipes, pbcopy, container injection)
-alias evst="envault export --stdout"
+# [vtst] Stream dotenv format to stdout (pipes, pbcopy, container injection)
+alias vtst="envault export --stdout"
 
-# [evsh] Dynamic Shell Runtime Ingestion (silent, zero-log eval)
-evsh() {
+# [vtsh] Dynamic Shell Runtime Ingestion (silent, zero-log eval)
+vtsh() {
     eval "$(envault export -s "$@")"
 }
 
-# [evxf] Export to specific file name followed by keys if any
-evxf() {
+# [vtxf] Export to specific file name followed by keys if any
+vtxf() {
     if [ -z "${1:-}" ]; then
-        echo "Usage: evxf <filename> [keys...]" >&2
+        echo "Usage: vtxf <filename> [keys...]" >&2
         return 1
     fi
     local dest_file="$1"

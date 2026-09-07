@@ -23,8 +23,24 @@ ensure_storage() {
     [ -f "$KEYS_LIST_FILE" ] || touch "$KEYS_LIST_FILE"
 }
 
+validate_key_name() {
+    local key="$1"
+    local silent="${2:-false}"
+    if [[ ! "$key" =~ ^[a-zA-Z0-9_]+$ ]]; then
+        [ "$silent" = false ] && echo "❌ Invalid key name '$key'. Keys may only contain alphanumeric characters and underscores (e.g. 'stripe_key')." >&2
+        return 1
+    fi
+    return 0
+}
+
+normalize_key() {
+    echo "$1" | tr '[:upper:]' '[:lower:]'
+}
+
 is_tracked() {
-    [ -f "$KEYS_LIST_FILE" ] && grep -Fxq "$1" "$KEYS_LIST_FILE" 2>/dev/null
+    local key
+    key=$(normalize_key "$1")
+    [ -f "$KEYS_LIST_FILE" ] && grep -Fxq "$key" "$KEYS_LIST_FILE" 2>/dev/null
 }
 
 save_to_keychain() {
@@ -52,11 +68,17 @@ cmd_check() {
         echo "❌ Usage: envault check <service_name>"
         exit 1
     fi
-    local service_name="$1"
+    local raw_name="$1"
     local silent_mode=false
     if [ "${2:-}" = "--silent" ] || [ "${2:-}" = "-s" ]; then
         silent_mode=true
     fi
+
+    if ! validate_key_name "$raw_name" "$silent_mode"; then
+        exit 1
+    fi
+    local service_name
+    service_name=$(normalize_key "$raw_name")
 
     ensure_storage
     if is_tracked "$service_name"; then
@@ -75,7 +97,7 @@ cmd_ls() {
         exit 0
     fi
     echo "📋 Vault Keys Catalog:"
-    awk '{print "  • " toupper($0)}' "$KEYS_LIST_FILE"
+    awk '{print "  • " tolower($0)}' "$KEYS_LIST_FILE"
 }
 
 cmd_add() {
@@ -83,7 +105,12 @@ cmd_add() {
         echo "❌ Usage: envault add <service_name>"
         exit 1
     fi
-    local service_name="$1"
+    local raw_name="$1"
+    if ! validate_key_name "$raw_name"; then
+        exit 1
+    fi
+    local service_name
+    service_name=$(normalize_key "$raw_name")
 
     # Ensure terminal echo is restored if interrupted during hidden read
     trap 'stty echo 2>/dev/null || true' RETURN INT TERM
@@ -139,7 +166,12 @@ cmd_rm() {
         echo "❌ Usage: envault rm <service_name>"
         exit 1
     fi
-    local service_name="$1"
+    local raw_name="$1"
+    if ! validate_key_name "$raw_name"; then
+        exit 1
+    fi
+    local service_name
+    service_name=$(normalize_key "$raw_name")
 
     ensure_storage
     if is_tracked "$service_name"; then
@@ -244,9 +276,14 @@ cmd_export() {
         service_name="${service_name%$'\r'}"
         [ -z "$service_name" ] && continue
 
-        # Convert lowercase and hyphens to valid uppercase shell identifiers
+        if ! validate_key_name "$service_name"; then
+            continue
+        fi
+        service_name=$(normalize_key "$service_name")
+
+        # Convert lowercase snake_case to standard uppercase shell identifiers
         local env_var_name
-        env_var_name=$(echo "$service_name" | tr '[:lower:]-' '[:upper:]_')
+        env_var_name=$(echo "$service_name" | tr '[:lower:]' '[:upper:]')
         
         local secret
         secret=$(security find-generic-password -a "$CURRENT_USER" -s "$service_name" -w "${KEYCHAIN_ARGS[@]}" 2>/dev/null || true)

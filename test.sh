@@ -236,12 +236,12 @@ suite_ls() {
     assert_contains "Empty catalog displays no keys tracked message" "No keys tracked yet" "$output"
 
     echo "api_key_alpha" >> "$TEST_CONFIG/.keys_list"
-    echo "db-password-beta" >> "$TEST_CONFIG/.keys_list"
+    echo "db_password_beta" >> "$TEST_CONFIG/.keys_list"
 
     output=$("$ENVAULT" ls 2>&1)
     assert_contains "Populated catalog displays header" "Vault Keys Catalog:" "$output"
-    assert_contains "Catalog formats keys uppercase with bullets" "• API_KEY_ALPHA" "$output"
-    assert_contains "Catalog formats hyphenated key uppercase" "• DB-PASSWORD-BETA" "$output"
+    assert_contains "Catalog formats keys lowercase snake_case with bullets" "• api_key_alpha" "$output"
+    assert_contains "Catalog formats second key lowercase snake_case" "• db_password_beta" "$output"
 }
 
 suite_add() {
@@ -309,11 +309,11 @@ suite_export() {
     output=$("$ENVAULT" export --stdout 2>&1)
     assert_equals "export --stdout on empty catalog outputs nothing" "" "$output"
 
-    # Seed tracking and keychain secrets (including hyphens and special chars in secrets)
-    echo "aws-access-key" > "$TEST_CONFIG/.keys_list"
+    # Seed tracking and keychain secrets
+    echo "aws_access_key" > "$TEST_CONFIG/.keys_list"
     echo "stripe_secret" >> "$TEST_CONFIG/.keys_list"
     echo "special_secret" >> "$TEST_CONFIG/.keys_list"
-    echo "my_aws_key" > "$MOCK_STORE/aws-access-key"
+    echo "my_aws_key" > "$MOCK_STORE/aws_access_key"
     echo "sk_test_999" > "$MOCK_STORE/stripe_secret"
     echo 'p@ss"w$ord'\''123' > "$MOCK_STORE/special_secret"
 
@@ -386,7 +386,7 @@ suite_export() {
     assert_equals "eval ingestion sets SPECIAL_SECRET with quotes and dollar signs intact" 'p@ss"w$ord'\''123' "$SPECIAL_SECRET"
 
     # Test 8: Filtered export
-    output=$("$ENVAULT" export --stdout aws-access-key)
+    output=$("$ENVAULT" export --stdout aws_access_key)
     assert_contains "export filtered includes requested key" 'AWS_ACCESS_KEY="my_aws_key"' "$output"
     if [[ "$output" != *"STRIPE_SECRET"* ]]; then
         echo -e "  ${GREEN}✓ PASS:${RESET} export filtered excludes unrequested key"
@@ -450,6 +450,114 @@ suite_env() {
     assert_contains "Fetch succeeds with export when USER env var is unset" 'export FALLBACK_USER_TEST=' "$output"
 }
 
+suite_validation() {
+    echo -e "\n${YELLOW}Running Suite: Key Name Validation${RESET}"
+    local output code
+
+    # Reject hyphenated keys
+    set +e
+    output=$(echo "val" | ENVAULT_TTY=/dev/stdin "$ENVAULT" add stripe-secret-key 2>&1)
+    code=$?
+    set -e
+    assert_exit_code "add with hyphen exits 1" 1 "$code"
+    assert_contains "add with hyphen outputs invalid key error" "Invalid key name 'stripe-secret-key'" "$output"
+    assert_contains "add error mentions underscores" "alphanumeric characters and underscores" "$output"
+
+    # Reject special characters
+    set +e
+    output=$(echo "val" | ENVAULT_TTY=/dev/stdin "$ENVAULT" add "api.key" 2>&1)
+    code=$?
+    set -e
+    assert_exit_code "add with dot exits 1" 1 "$code"
+
+    set +e
+    output=$(echo "val" | ENVAULT_TTY=/dev/stdin "$ENVAULT" add "stripe@key" 2>&1)
+    code=$?
+    set -e
+    assert_exit_code "add with @ exits 1" 1 "$code"
+
+    set +e
+    output=$(echo "val" | ENVAULT_TTY=/dev/stdin "$ENVAULT" add "stripe key" 2>&1)
+    code=$?
+    set -e
+    assert_exit_code "add with space exits 1" 1 "$code"
+
+    # Check and rm validation
+    set +e
+    output=$("$ENVAULT" check "invalid-key" 2>&1)
+    code=$?
+    set -e
+    assert_exit_code "check with invalid key exits 1" 1 "$code"
+    assert_contains "check with invalid key displays error" "Invalid key name" "$output"
+
+    set +e
+    output=$("$ENVAULT" rm "invalid-key" 2>&1)
+    code=$?
+    set -e
+    assert_exit_code "rm with invalid key exits 1" 1 "$code"
+    assert_contains "rm with invalid key displays error" "Invalid key name" "$output"
+}
+
+suite_case_insensitivity() {
+    echo -e "\n${YELLOW}Running Suite: Case-Insensitivity & Normalization${RESET}"
+    local output code
+
+    # 1. Add key using UPPERCASE input -> stored as lowercase in .keys_list and keychain
+    output=$(echo "case_secret_123" | ENVAULT_TTY=/dev/stdin "$ENVAULT" add MY_CASE_SERVICE 2>&1)
+    assert_contains "add with uppercase stores successfully" "Successfully stored 'my_case_service'!" "$output"
+    assert_contains "stored key in .keys_list is lowercase" "my_case_service" "$(cat "$TEST_CONFIG/.keys_list")"
+    assert_equals "stored key in keychain is lowercase" "case_secret_123" "$(cat "$MOCK_STORE/my_case_service")"
+
+    # 2. Check using lowercase, uppercase, and mixed case
+    set +e
+    output=$("$ENVAULT" check my_case_service 2>&1)
+    code=$?
+    set -e
+    assert_exit_code "check with lowercase exits 0" 0 "$code"
+    assert_contains "check lowercase matches" "is currently tracked" "$output"
+
+    set +e
+    output=$("$ENVAULT" check MY_CASE_SERVICE 2>&1)
+    code=$?
+    set -e
+    assert_exit_code "check with uppercase exits 0" 0 "$code"
+    assert_contains "check uppercase matches" "is currently tracked" "$output"
+
+    set +e
+    output=$("$ENVAULT" check My_Case_Service 2>&1)
+    code=$?
+    set -e
+    assert_exit_code "check with mixed case exits 0" 0 "$code"
+    assert_contains "check mixed case matches" "is currently tracked" "$output"
+
+    # 3. Add lowercase key then attempt to add UPPERCASE variant -> triggers overwrite prompt instead of duplicate
+    local input_abort
+    input_abort=$(printf "n\n")
+    output=$(echo "$input_abort" | ENVAULT_TTY=/dev/stdin "$ENVAULT" add my_case_service 2>&1)
+    assert_contains "add uppercase variant prompts overwrite" "already exists. Overwrite?" "$output"
+    assert_contains "add uppercase variant aborts" "Aborted." "$output"
+
+    # Verify no duplicate entries in .keys_list
+    local match_count
+    match_count=$(grep -cx "my_case_service" "$TEST_CONFIG/.keys_list")
+    assert_equals "no duplicate entry created in .keys_list" "1" "$match_count"
+
+    # 4. Export with case-insensitive argument
+    output=$("$ENVAULT" export --stdout MY_CASE_SERVICE)
+    assert_contains "export finds key with uppercase argument" 'MY_CASE_SERVICE="case_secret_123"' "$output"
+
+    # 5. Remove using uppercase argument
+    output=$("$ENVAULT" rm MY_CASE_SERVICE 2>&1)
+    assert_contains "rm with uppercase argument succeeds" "Removed 'my_case_service' from vault tracking list" "$output"
+    if ! grep -Fxq "my_case_service" "$TEST_CONFIG/.keys_list"; then
+        echo -e "  ${GREEN}✓ PASS:${RESET} rm purged lowercase entry from .keys_list"
+        PASSED_COUNT=$((PASSED_COUNT + 1))
+    else
+        echo -e "  ${RED}✗ FAIL:${RESET} Entry still found in .keys_list after case-insensitive rm"
+        FAILED_COUNT=$((FAILED_COUNT + 1))
+    fi
+}
+
 # ------------------------------------------------------------------------------
 # Dispatcher / Main Runner
 # ------------------------------------------------------------------------------
@@ -459,13 +567,15 @@ echo -e "${BLUE}${BOLD}================================================${RESET}"
 
 TARGET="${1:-all}"
 case "$TARGET" in
-    router) suite_router ;;
-    check)  suite_check ;;
-    ls)     suite_ls ;;
-    add)    suite_add ;;
-    export) suite_export ;;
-    rm)     suite_rm ;;
-    env)    suite_env ;;
+    router)      suite_router ;;
+    check)       suite_check ;;
+    ls)          suite_ls ;;
+    add)         suite_add ;;
+    export)      suite_export ;;
+    rm)          suite_rm ;;
+    env)         suite_env ;;
+    validation)  suite_validation ;;
+    case)        suite_case_insensitivity ;;
     all)
         suite_router
         suite_check
@@ -474,9 +584,11 @@ case "$TARGET" in
         suite_export
         suite_rm
         suite_env
+        suite_validation
+        suite_case_insensitivity
         ;;
     *)
-        echo -e "${RED}Unknown suite: '$TARGET'. Available: router, check, ls, add, export, rm, env, all${RESET}"
+        echo -e "${RED}Unknown suite: '$TARGET'. Available: router, check, ls, add, export, rm, env, validation, case, all${RESET}"
         exit 1
         ;;
 esac
