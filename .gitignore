@@ -1,0 +1,8 @@
+# Ignore local development test files
+.env
+.envrc
+.keys_list
+.config/
+
+# OS metadata
+.DS_Store

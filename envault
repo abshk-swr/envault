@@ -1,0 +1,291 @@
+#!/bin/bash
+# ==============================================================================
+# envault: Zero-dependency secure environment secret utility
+# ==============================================================================
+
+export TRACKING_DIR="${TRACKING_DIR:-$HOME/.config/envault}"
+export KEYS_LIST_FILE="$TRACKING_DIR/.keys_list"
+CURRENT_USER="${USER:-$(whoami)}"
+TTY_IN="${ENVAULT_TTY:-${ENV_MGR_TTY:-/dev/tty}}"
+
+# Keychain path detection for macOS
+KEYCHAIN_ARGS=()
+if [ -n "${KEYCHAIN_PATH:-}" ]; then
+    KEYCHAIN_ARGS=("$KEYCHAIN_PATH")
+elif [ -f "$HOME/Library/Keychains/login.keychain-db" ]; then
+    KEYCHAIN_ARGS=("$HOME/Library/Keychains/login.keychain-db")
+elif [ -f "$HOME/Library/Keychains/login.keychain" ]; then
+    KEYCHAIN_ARGS=("$HOME/Library/Keychains/login.keychain")
+fi
+
+ensure_storage() {
+    [ -d "$TRACKING_DIR" ] || mkdir -p "$TRACKING_DIR"
+    [ -f "$KEYS_LIST_FILE" ] || touch "$KEYS_LIST_FILE"
+}
+
+is_tracked() {
+    [ -f "$KEYS_LIST_FILE" ] && grep -Fxq "$1" "$KEYS_LIST_FILE" 2>/dev/null
+}
+
+save_to_keychain() {
+    local service_name="$1"
+    local secret_value="$2"
+    security add-generic-password -a "$CURRENT_USER" -s "$service_name" -w "$secret_value" -U "${KEYCHAIN_ARGS[@]}" 2>/dev/null || \
+    security add-generic-password -a "$CURRENT_USER" -s "$service_name" -w "$secret_value" "${KEYCHAIN_ARGS[@]}" 2>/dev/null
+}
+
+cmd_usage() {
+    echo "Usage: envault <command> [args]"
+    echo ""
+    echo "Commands:"
+    echo "  add <name>      Securely store/update a key in macOS Keychain"
+    echo "  rm <name>       Remove a key from both the tracking list and Keychain"
+    echo "  export [opts]   Export credentials to .env file or shell format"
+    echo "                  Options: -s|--shell, -o|--output <file>, -f|--force, --stdout|-c"
+    echo "  ls              List all currently tracked service names"
+    echo "  check <name>    Check if a service name is tracked in catalog [--silent|-s]"
+    exit 1
+}
+
+cmd_check() {
+    if [ -z "${1:-}" ]; then
+        echo "❌ Usage: envault check <service_name>"
+        exit 1
+    fi
+    local service_name="$1"
+    local silent_mode=false
+    if [ "${2:-}" = "--silent" ] || [ "${2:-}" = "-s" ]; then
+        silent_mode=true
+    fi
+
+    ensure_storage
+    if is_tracked "$service_name"; then
+        [ "$silent_mode" = false ] && echo "✅ '$service_name' is currently tracked."
+        exit 0
+    else
+        [ "$silent_mode" = false ] && echo "🔍 '$service_name' does not exist in tracking list."
+        exit 1
+    fi
+}
+
+cmd_ls() {
+    ensure_storage
+    if [ ! -s "$KEYS_LIST_FILE" ]; then
+        echo "📋 No keys tracked yet."
+        exit 0
+    fi
+    echo "📋 Vault Keys Catalog:"
+    awk '{print "  • " toupper($0)}' "$KEYS_LIST_FILE"
+}
+
+cmd_add() {
+    if [ -z "${1:-}" ]; then
+        echo "❌ Usage: envault add <service_name>"
+        exit 1
+    fi
+    local service_name="$1"
+
+    # Ensure terminal echo is restored if interrupted during hidden read
+    trap 'stty echo 2>/dev/null || true' RETURN INT TERM
+
+    ensure_storage
+    if is_tracked "$service_name"; then
+        echo -n "⚠️  '$service_name' already exists. Overwrite? (y/N): "
+        read -r confirmation < "$TTY_IN"
+        [[ ! "$confirmation" =~ ^[Yy]$ ]] && { echo "🚫 Aborted."; exit 0; }
+    fi
+
+    echo -n "🔑 Enter secret for '$service_name': "
+    read -s secret_value < "$TTY_IN"
+    echo ""
+
+    [ -z "$secret_value" ] && { echo "❌ Secret cannot be empty."; exit 1; }
+
+    if save_to_keychain "$service_name" "$secret_value"; then
+        if ! is_tracked "$service_name"; then
+            echo "$service_name" >> "$KEYS_LIST_FILE"
+        fi
+        echo "✅ Successfully stored '$service_name'!"
+    else
+        echo "⚠️  Failed to access macOS Keychain (it may be locked)."
+        echo -n "🔓 Would you like to unlock your Keychain now? (y/N): "
+        read -r unlock_choice < "$TTY_IN"
+        if [[ "$unlock_choice" =~ ^[Yy]$ ]]; then
+            local unlock_cmd=(security unlock-keychain)
+            [ ${#KEYCHAIN_ARGS[@]} -gt 0 ] && unlock_cmd+=("${KEYCHAIN_ARGS[@]}")
+            if "${unlock_cmd[@]}" < "$TTY_IN"; then
+                if save_to_keychain "$service_name" "$secret_value"; then
+                    if ! is_tracked "$service_name"; then
+                        echo "$service_name" >> "$KEYS_LIST_FILE"
+                    fi
+                    echo "✅ Successfully stored '$service_name'!"
+                    exit 0
+                fi
+            fi
+        fi
+
+        echo "❌ Failed to save password to system Keychain entry."
+        if [ ${#KEYCHAIN_ARGS[@]} -gt 0 ]; then
+            echo "💡 Tip: Run 'security unlock-keychain \"${KEYCHAIN_ARGS[0]}\"' in your terminal and enter your Mac login password to unlock it."
+        else
+            echo "💡 Tip: Run 'security unlock-keychain' in your terminal and enter your Mac login password to unlock it."
+        fi
+        exit 1
+    fi
+}
+
+cmd_rm() {
+    if [ -z "${1:-}" ]; then
+        echo "❌ Usage: envault rm <service_name>"
+        exit 1
+    fi
+    local service_name="$1"
+
+    ensure_storage
+    if is_tracked "$service_name"; then
+        security delete-generic-password -a "$CURRENT_USER" -s "$service_name" "${KEYCHAIN_ARGS[@]}" 2>/dev/null || true
+
+        local tmp_file
+        tmp_file=$(mktemp)
+        grep -Fxv "$service_name" "$KEYS_LIST_FILE" > "$tmp_file" || true
+        mv "$tmp_file" "$KEYS_LIST_FILE"
+        echo "🗑️  Removed '$service_name' from vault tracking list and Keychain."
+    else
+        echo "ℹ️  Service '$service_name' was not tracked in list."
+    fi
+}
+
+cmd_export() {
+    local format="FILE"
+    local dest_file=""
+    local custom_dest=false
+    local target_stdout=false
+    local force=false
+    local keys_to_load=()
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -s|--shell)
+                format="SHELL"
+                shift
+                ;;
+            -o|--output|--file)
+                if [ -z "${2:-}" ]; then
+                    echo "❌ Option $1 requires a file path argument." >&2
+                    exit 1
+                fi
+                dest_file="$2"
+                custom_dest=true
+                shift 2
+                ;;
+            -f|--force)
+                force=true
+                shift
+                ;;
+            -c|--stdout)
+                target_stdout=true
+                shift
+                ;;
+            --)
+                shift
+                while [ $# -gt 0 ]; do
+                    keys_to_load+=("$1")
+                    shift
+                done
+                break
+                ;;
+            -*)
+                echo "❌ Unknown option: $1" >&2
+                echo "Usage: envault export [-s|--shell] [-o|--output <file>] [-f|--force] [--stdout|-c] [names...]" >&2
+                exit 1
+                ;;
+            *)
+                keys_to_load+=("$1")
+                shift
+                ;;
+        esac
+    done
+
+    local dest_type="FILE"
+    if [ "$target_stdout" = true ]; then
+        dest_type="STDOUT"
+    elif [ "$format" = "SHELL" ] && [ "$custom_dest" = false ]; then
+        dest_type="STDOUT"
+    else
+        dest_type="FILE"
+        if [ "$custom_dest" = false ]; then
+            dest_file=".env"
+        fi
+    fi
+
+    # Check overwrite guard if destination is file
+    if [ "$dest_type" = "FILE" ]; then
+        if [ -f "$dest_file" ] && [ "$force" = false ]; then
+            echo -n "⚠️  '$dest_file' already exists. Overwrite? (y/N): "
+            local confirmation=""
+            read -r confirmation < "$TTY_IN" 2>/dev/null || confirmation="n"
+            [[ ! "$confirmation" =~ ^[Yy]$ ]] && { echo "🚫 Aborted."; exit 0; }
+        fi
+    fi
+
+    ensure_storage
+    if [ ${#keys_to_load[@]} -eq 0 ]; then
+        if [ ! -s "$KEYS_LIST_FILE" ]; then
+            exit 0
+        fi
+        while IFS= read -r line || [ -n "$line" ]; do
+            line="${line%$'\r'}"
+            [ -n "$line" ] && keys_to_load+=("$line")
+        done < "$KEYS_LIST_FILE"
+    fi
+
+    local output_buffer=""
+    for service_name in "${keys_to_load[@]}"; do
+        service_name="${service_name%$'\r'}"
+        [ -z "$service_name" ] && continue
+
+        # Convert lowercase and hyphens to valid uppercase shell identifiers
+        local env_var_name
+        env_var_name=$(echo "$service_name" | tr '[:lower:]-' '[:upper:]_')
+        
+        local secret
+        secret=$(security find-generic-password -a "$CURRENT_USER" -s "$service_name" -w "${KEYCHAIN_ARGS[@]}" 2>/dev/null || true)
+
+        if [ -n "$secret" ]; then
+            if [ "$format" = "FILE" ]; then
+                local escaped_secret
+                escaped_secret=$(printf '%s' "$secret" | sed 's/\\/\\\\/g; s/"/\\"/g')
+                output_buffer+="${env_var_name}=\"${escaped_secret}\""$'\n'
+            else
+                local shell_line
+                shell_line=$(printf 'export %s=%q\n' "$env_var_name" "$secret")
+                output_buffer+="${shell_line}"$'\n'
+            fi
+        else
+            echo "⚠️  Warning: Key '$service_name' not found in Keychain." >&2
+        fi
+    done
+
+    if [ "$dest_type" = "STDOUT" ]; then
+        printf '%s' "$output_buffer"
+    else
+        local parent_dir
+        parent_dir=$(dirname "$dest_file")
+        [ -d "$parent_dir" ] || mkdir -p "$parent_dir"
+        printf '%s' "$output_buffer" > "$dest_file"
+        echo "✅ Exported credentials to '$dest_file'."
+    fi
+}
+
+CMD="${1:-}"
+[ $# -gt 0 ] && shift
+
+case "$CMD" in
+    add)    cmd_add "$@" ;;
+    rm)     cmd_rm "$@" ;;
+    export) cmd_export "$@" ;;
+    ls)     cmd_ls "$@" ;;
+    check)  cmd_check "$@" ;;
+    *)      cmd_usage ;;
+esac
+
