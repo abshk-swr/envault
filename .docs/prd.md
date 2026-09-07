@@ -80,23 +80,32 @@ The tool delegates workspace orchestration to the user's shell configuration:
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
 
+# Core Subcommand Aliases
 alias eva="envault add"
 alias evl="envault ls"
 alias eve="envault check"
+alias evr="envault rm"
 
-# [evx] Dynamic Shell Runtime Ingestion (silent, zero-log eval)
-evx() {
+# [evx] Default export to .env
+alias evx="envault export"
+
+# [evst] Stream dotenv format to stdout (pipes, pbcopy, container injection)
+alias evst="envault export --stdout"
+
+# [evsh] Dynamic Shell Runtime Ingestion (silent, zero-log eval)
+evsh() {
     eval "$(envault export -s "$@")"
 }
 
-# [evxf] Decoupled Workspace Construction (Stitches Tools Together)
+# [evxf] Export to specific file name followed by keys if any
 evxf() {
-    envault export "$@"
-    echo "dotenv" > .envrc
-    touch .gitignore
-    grep -Fxq ".env" .gitignore || echo -e "\n# Local secrets mapping\n.env" >> .gitignore
-    grep -Fxq ".envrc" .gitignore || echo ".envrc" >> .gitignore
-    command -v direnv &> /dev/null && direnv allow
+    if [ -z "${1:-}" ]; then
+        echo "Usage: evxf <filename> [keys...]" >&2
+        return 1
+    fi
+    local dest_file="$1"
+    shift
+    envault export -o "$dest_file" "$@"
 }
 ```
 
