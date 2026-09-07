@@ -86,8 +86,8 @@ envault check STRIPE_SECRET_KEY
 
 > **Key Naming Invariants:**
 > * Keys must match `^[a-zA-Z0-9_]+$`. Hyphens and special characters are rejected with an actionable error.
-> * Storage and lookups are completely **case-insensitive** and normalized to `snake_case`.
-> * Export outputs standard uppercase environment variables (e.g. `STRIPE_SECRET_KEY`).
+> * **WYSIWYG Casing**: Keys are stored and exported with the exact casing you enter (`ab_cd`, `STRIPE_KEY`, `apiKey`). What you store is what gets exported to `.env` and your shell runtime.
+> * **Case-Insensitive Management**: Lookups (`check`, `rm`), filtered `export`, and duplicate collision detection are 100% case-insensitive (e.g. `check STRIPE_SECRET_KEY` finds `stripe_secret_key`).
 
 ---
 

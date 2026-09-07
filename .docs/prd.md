@@ -67,9 +67,8 @@ All subcommands are executed within `envault` via internal in-process function r
   * `--stdout`, `-c`: Streams `.env` formatted content directly to `stdout` instead of writing to disk (for pipes, clipboard, or containers).
 * **Identifier Sanitization & Validation**:
   * Keys are strictly validated to match `^[a-zA-Z0-9_]+$`. Hyphens and special characters are rejected at ingestion time.
-  * Keys are normalized to lowercase `snake_case` in tracking storage and macOS Keychain.
-  * Lookups are completely case-insensitive.
-  * When exported to `.env` files or shell runtime environments, keys are converted to canonical uppercase POSIX environment variables (e.g. `stripe_secret_key` → `STRIPE_SECRET_KEY`).
+  * **WYSIWYG Casing**: Keys are stored and exported with the exact casing provided by the user (`ab_cd`, `STRIPE_KEY`, `apiKey`).
+  * **Case-Insensitive Management**: Lookups (`check`, `rm`), filtered `export`, and duplicate collision detection are 100% case-insensitive.
 * **Safe Quoting**:
   * File mode escapes backslashes and double quotes (`KEY="escaped\"val"`).
   * Shell mode uses `printf '%q'` for robust shell escaping (`export KEY=val` / `export KEY="complex\$val"`), ensuring safe `eval` ingestion with arbitrary special characters.

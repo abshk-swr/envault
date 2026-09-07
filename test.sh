@@ -309,13 +309,13 @@ suite_export() {
     output=$("$ENVAULT" export --stdout 2>&1)
     assert_equals "export --stdout on empty catalog outputs nothing" "" "$output"
 
-    # Seed tracking and keychain secrets
-    echo "aws_access_key" > "$TEST_CONFIG/.keys_list"
-    echo "stripe_secret" >> "$TEST_CONFIG/.keys_list"
-    echo "special_secret" >> "$TEST_CONFIG/.keys_list"
-    echo "my_aws_key" > "$MOCK_STORE/aws_access_key"
-    echo "sk_test_999" > "$MOCK_STORE/stripe_secret"
-    echo 'p@ss"w$ord'\''123' > "$MOCK_STORE/special_secret"
+    # Seed tracking and keychain secrets (standard uppercase credentials)
+    echo "AWS_ACCESS_KEY" > "$TEST_CONFIG/.keys_list"
+    echo "STRIPE_SECRET" >> "$TEST_CONFIG/.keys_list"
+    echo "SPECIAL_SECRET" >> "$TEST_CONFIG/.keys_list"
+    echo "my_aws_key" > "$MOCK_STORE/AWS_ACCESS_KEY"
+    echo "sk_test_999" > "$MOCK_STORE/STRIPE_SECRET"
+    echo 'p@ss"w$ord'\''123' > "$MOCK_STORE/SPECIAL_SECRET"
 
     # Test 1: Default export to .env
     output=$(cd "$workdir" && "$ENVAULT" export 2>&1)
@@ -385,7 +385,7 @@ suite_export() {
     assert_equals "eval ingestion sets STRIPE_SECRET" "sk_test_999" "$STRIPE_SECRET"
     assert_equals "eval ingestion sets SPECIAL_SECRET with quotes and dollar signs intact" 'p@ss"w$ord'\''123' "$SPECIAL_SECRET"
 
-    # Test 8: Filtered export
+    # Test 8: Filtered export (with case-insensitive argument lookup)
     output=$("$ENVAULT" export --stdout aws_access_key)
     assert_contains "export filtered includes requested key" 'AWS_ACCESS_KEY="my_aws_key"' "$output"
     if [[ "$output" != *"STRIPE_SECRET"* ]]; then
@@ -445,8 +445,8 @@ suite_rm() {
 suite_env() {
     echo -e "\n${YELLOW}Running Suite: CURRENT_USER Environment Fallback${RESET}"
     local output
-    echo "fallback_secret_999" | env -u USER ENVAULT_TTY=/dev/stdin "$ENVAULT" add fallback_user_test >/dev/null 2>&1
-    output=$(env -u USER "$ENVAULT" export -s fallback_user_test 2>&1)
+    echo "fallback_secret_999" | env -u USER ENVAULT_TTY=/dev/stdin "$ENVAULT" add FALLBACK_USER_TEST >/dev/null 2>&1
+    output=$(env -u USER "$ENVAULT" export -s FALLBACK_USER_TEST 2>&1)
     assert_contains "Fetch succeeds with export when USER env var is unset" 'export FALLBACK_USER_TEST=' "$output"
 }
 
@@ -499,16 +499,21 @@ suite_validation() {
 }
 
 suite_case_insensitivity() {
-    echo -e "\n${YELLOW}Running Suite: Case-Insensitivity & Normalization${RESET}"
+    echo -e "\n${YELLOW}Running Suite: Case-Insensitivity & WYSIWYG Preservation${RESET}"
     local output code
 
-    # 1. Add key using UPPERCASE input -> stored as lowercase in .keys_list and keychain
-    output=$(echo "case_secret_123" | ENVAULT_TTY=/dev/stdin "$ENVAULT" add MY_CASE_SERVICE 2>&1)
-    assert_contains "add with uppercase stores successfully" "Successfully stored 'my_case_service'!" "$output"
-    assert_contains "stored key in .keys_list is lowercase" "my_case_service" "$(cat "$TEST_CONFIG/.keys_list")"
-    assert_equals "stored key in keychain is lowercase" "case_secret_123" "$(cat "$MOCK_STORE/my_case_service")"
+    # 1. Add key using lowercase input -> stored as lowercase in .keys_list and keychain (WYSIWYG)
+    output=$(echo "case_secret_123" | ENVAULT_TTY=/dev/stdin "$ENVAULT" add my_case_service 2>&1)
+    assert_contains "add with lowercase stores successfully" "Successfully stored 'my_case_service'!" "$output"
+    assert_contains "stored key in .keys_list preserves lowercase" "my_case_service" "$(cat "$TEST_CONFIG/.keys_list")"
+    assert_equals "stored key in keychain preserves lowercase" "case_secret_123" "$(cat "$MOCK_STORE/my_case_service")"
 
-    # 2. Check using lowercase, uppercase, and mixed case
+    # 2. Add key using mixedCase input -> stored with exact mixedCase in .keys_list and keychain (WYSIWYG)
+    output=$(echo "mixed_val" | ENVAULT_TTY=/dev/stdin "$ENVAULT" add stripeApiKey 2>&1)
+    assert_contains "add with mixedCase stores successfully" "Successfully stored 'stripeApiKey'!" "$output"
+    assert_contains "stored key in .keys_list preserves mixedCase" "stripeApiKey" "$(cat "$TEST_CONFIG/.keys_list")"
+
+    # 3. Check using lowercase, uppercase, and mixed case (case-insensitive lookups)
     set +e
     output=$("$ENVAULT" check my_case_service 2>&1)
     code=$?
@@ -530,27 +535,34 @@ suite_case_insensitivity() {
     assert_exit_code "check with mixed case exits 0" 0 "$code"
     assert_contains "check mixed case matches" "is currently tracked" "$output"
 
-    # 3. Add lowercase key then attempt to add UPPERCASE variant -> triggers overwrite prompt instead of duplicate
+    # 4. Add lowercase key then attempt to add UPPERCASE variant -> triggers overwrite prompt instead of duplicate
     local input_abort
     input_abort=$(printf "n\n")
-    output=$(echo "$input_abort" | ENVAULT_TTY=/dev/stdin "$ENVAULT" add my_case_service 2>&1)
-    assert_contains "add uppercase variant prompts overwrite" "already exists. Overwrite?" "$output"
+    output=$(echo "$input_abort" | ENVAULT_TTY=/dev/stdin "$ENVAULT" add MY_CASE_SERVICE 2>&1)
+    assert_contains "add uppercase variant prompts overwrite" "'my_case_service' already exists. Overwrite?" "$output"
     assert_contains "add uppercase variant aborts" "Aborted." "$output"
 
     # Verify no duplicate entries in .keys_list
     local match_count
-    match_count=$(grep -cx "my_case_service" "$TEST_CONFIG/.keys_list")
+    match_count=$(grep -cxi "my_case_service" "$TEST_CONFIG/.keys_list")
     assert_equals "no duplicate entry created in .keys_list" "1" "$match_count"
 
-    # 4. Export with case-insensitive argument
-    output=$("$ENVAULT" export --stdout MY_CASE_SERVICE)
-    assert_contains "export finds key with uppercase argument" 'MY_CASE_SERVICE="case_secret_123"' "$output"
+    # 5. Export preserves exact stored case (WYSIWYG)
+    output=$("$ENVAULT" export --stdout my_case_service)
+    assert_contains "export preserves lowercase key" 'my_case_service="case_secret_123"' "$output"
 
-    # 5. Remove using uppercase argument
+    output=$("$ENVAULT" export --stdout stripeApiKey)
+    assert_contains "export preserves mixedCase key" 'stripeApiKey="mixed_val"' "$output"
+
+    # Case-insensitive filtered export
+    output=$("$ENVAULT" export --stdout MY_CASE_SERVICE)
+    assert_contains "export finds key with uppercase query" 'my_case_service="case_secret_123"' "$output"
+
+    # 6. Remove using uppercase argument
     output=$("$ENVAULT" rm MY_CASE_SERVICE 2>&1)
     assert_contains "rm with uppercase argument succeeds" "Removed 'my_case_service' from vault tracking list" "$output"
-    if ! grep -Fxq "my_case_service" "$TEST_CONFIG/.keys_list"; then
-        echo -e "  ${GREEN}✓ PASS:${RESET} rm purged lowercase entry from .keys_list"
+    if ! grep -iFxq "my_case_service" "$TEST_CONFIG/.keys_list"; then
+        echo -e "  ${GREEN}✓ PASS:${RESET} rm purged entry from .keys_list"
         PASSED_COUNT=$((PASSED_COUNT + 1))
     else
         echo -e "  ${RED}✗ FAIL:${RESET} Entry still found in .keys_list after case-insensitive rm"

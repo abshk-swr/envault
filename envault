@@ -33,14 +33,16 @@ validate_key_name() {
     return 0
 }
 
-normalize_key() {
-    echo "$1" | tr '[:upper:]' '[:lower:]'
+find_tracked_key() {
+    local target="$1"
+    [ -f "$KEYS_LIST_FILE" ] || return 1
+    grep -iFx "$target" "$KEYS_LIST_FILE" 2>/dev/null | head -n 1
 }
 
 is_tracked() {
-    local key
-    key=$(normalize_key "$1")
-    [ -f "$KEYS_LIST_FILE" ] && grep -Fxq "$key" "$KEYS_LIST_FILE" 2>/dev/null
+    local match
+    match=$(find_tracked_key "$1")
+    [ -n "$match" ]
 }
 
 save_to_keychain() {
@@ -77,15 +79,15 @@ cmd_check() {
     if ! validate_key_name "$raw_name" "$silent_mode"; then
         exit 1
     fi
-    local service_name
-    service_name=$(normalize_key "$raw_name")
 
     ensure_storage
-    if is_tracked "$service_name"; then
-        [ "$silent_mode" = false ] && echo "✅ '$service_name' is currently tracked."
+    local matched_key
+    matched_key=$(find_tracked_key "$raw_name")
+    if [ -n "$matched_key" ]; then
+        [ "$silent_mode" = false ] && echo "✅ '$matched_key' is currently tracked."
         exit 0
     else
-        [ "$silent_mode" = false ] && echo "🔍 '$service_name' does not exist in tracking list."
+        [ "$silent_mode" = false ] && echo "🔍 '$raw_name' does not exist in tracking list."
         exit 1
     fi
 }
@@ -97,7 +99,7 @@ cmd_ls() {
         exit 0
     fi
     echo "📋 Vault Keys Catalog:"
-    awk '{print "  • " tolower($0)}' "$KEYS_LIST_FILE"
+    awk '{print "  • " $0}' "$KEYS_LIST_FILE"
 }
 
 cmd_add() {
@@ -105,19 +107,19 @@ cmd_add() {
         echo "❌ Usage: envault add <service_name>"
         exit 1
     fi
-    local raw_name="$1"
-    if ! validate_key_name "$raw_name"; then
+    local service_name="$1"
+    if ! validate_key_name "$service_name"; then
         exit 1
     fi
-    local service_name
-    service_name=$(normalize_key "$raw_name")
 
     # Ensure terminal echo is restored if interrupted during hidden read
     trap 'stty echo 2>/dev/null || true' RETURN INT TERM
 
     ensure_storage
-    if is_tracked "$service_name"; then
-        echo -n "⚠️  '$service_name' already exists. Overwrite? (y/N): "
+    local existing_key
+    existing_key=$(find_tracked_key "$service_name")
+    if [ -n "$existing_key" ]; then
+        echo -n "⚠️  '$existing_key' already exists. Overwrite? (y/N): "
         read -r confirmation < "$TTY_IN"
         [[ ! "$confirmation" =~ ^[Yy]$ ]] && { echo "🚫 Aborted."; exit 0; }
     fi
@@ -128,8 +130,17 @@ cmd_add() {
 
     [ -z "$secret_value" ] && { echo "❌ Secret cannot be empty."; exit 1; }
 
+    # If overwriting an existing key with different casing, clean up old entry
+    if [ -n "$existing_key" ] && [ "$existing_key" != "$service_name" ]; then
+        security delete-generic-password -a "$CURRENT_USER" -s "$existing_key" "${KEYCHAIN_ARGS[@]}" 2>/dev/null || true
+        local tmp_file
+        tmp_file=$(mktemp)
+        grep -Fxv "$existing_key" "$KEYS_LIST_FILE" > "$tmp_file" || true
+        mv "$tmp_file" "$KEYS_LIST_FILE"
+    fi
+
     if save_to_keychain "$service_name" "$secret_value"; then
-        if ! is_tracked "$service_name"; then
+        if ! grep -Fxq "$service_name" "$KEYS_LIST_FILE" 2>/dev/null; then
             echo "$service_name" >> "$KEYS_LIST_FILE"
         fi
         echo "✅ Successfully stored '$service_name'!"
@@ -170,20 +181,20 @@ cmd_rm() {
     if ! validate_key_name "$raw_name"; then
         exit 1
     fi
-    local service_name
-    service_name=$(normalize_key "$raw_name")
 
     ensure_storage
-    if is_tracked "$service_name"; then
-        security delete-generic-password -a "$CURRENT_USER" -s "$service_name" "${KEYCHAIN_ARGS[@]}" 2>/dev/null || true
+    local matched_key
+    matched_key=$(find_tracked_key "$raw_name")
+    if [ -n "$matched_key" ]; then
+        security delete-generic-password -a "$CURRENT_USER" -s "$matched_key" "${KEYCHAIN_ARGS[@]}" 2>/dev/null || true
 
         local tmp_file
         tmp_file=$(mktemp)
-        grep -Fxv "$service_name" "$KEYS_LIST_FILE" > "$tmp_file" || true
+        grep -Fxv "$matched_key" "$KEYS_LIST_FILE" > "$tmp_file" || true
         mv "$tmp_file" "$KEYS_LIST_FILE"
-        echo "🗑️  Removed '$service_name' from vault tracking list and Keychain."
+        echo "🗑️  Removed '$matched_key' from vault tracking list and Keychain."
     else
-        echo "ℹ️  Service '$service_name' was not tracked in list."
+        echo "ℹ️  Service '$raw_name' was not tracked in list."
     fi
 }
 
@@ -261,29 +272,38 @@ cmd_export() {
     fi
 
     ensure_storage
+    local resolved_keys=()
     if [ ${#keys_to_load[@]} -eq 0 ]; then
         if [ ! -s "$KEYS_LIST_FILE" ]; then
             exit 0
         fi
         while IFS= read -r line || [ -n "$line" ]; do
             line="${line%$'\r'}"
-            [ -n "$line" ] && keys_to_load+=("$line")
+            [ -n "$line" ] && resolved_keys+=("$line")
         done < "$KEYS_LIST_FILE"
+    else
+        for k in "${keys_to_load[@]}"; do
+            k="${k%$'\r'}"
+            [ -z "$k" ] && continue
+            if ! validate_key_name "$k"; then
+                continue
+            fi
+            local matched
+            matched=$(find_tracked_key "$k")
+            if [ -n "$matched" ]; then
+                resolved_keys+=("$matched")
+            else
+                resolved_keys+=("$k")
+            fi
+        done
     fi
 
     local output_buffer=""
-    for service_name in "${keys_to_load[@]}"; do
+    for service_name in "${resolved_keys[@]}"; do
         service_name="${service_name%$'\r'}"
         [ -z "$service_name" ] && continue
 
-        if ! validate_key_name "$service_name"; then
-            continue
-        fi
-        service_name=$(normalize_key "$service_name")
-
-        # Convert lowercase snake_case to standard uppercase shell identifiers
-        local env_var_name
-        env_var_name=$(echo "$service_name" | tr '[:lower:]' '[:upper:]')
+        local env_var_name="$service_name"
         
         local secret
         secret=$(security find-generic-password -a "$CURRENT_USER" -s "$service_name" -w "${KEYCHAIN_ARGS[@]}" 2>/dev/null || true)
